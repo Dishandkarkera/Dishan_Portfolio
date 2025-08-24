@@ -31,6 +31,63 @@ const CONFIG = {
   }
 };
 
+// Warn when the site is opened over file:// — FormSubmit requires an HTTP(S) origin
+function warnIfFileProtocol() {
+  try {
+    if (window && window.location && window.location.protocol === 'file:') {
+      // inject simple styling for the banner
+      const style = document.createElement('style');
+      style.textContent = `
+        .file-protocol-warning {
+          position: fixed;
+          top: 0;
+          left: 0;
+          right: 0;
+          background: linear-gradient(90deg,#f97316,#ef4444);
+          color: white;
+          padding: 12px 16px;
+          font-weight: 600;
+          z-index: 12000;
+          text-align: center;
+          box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+        }
+        .file-protocol-warning a { color: rgba(255,255,255,0.95); text-decoration: underline; }
+      `;
+      document.head.appendChild(style);
+
+      const banner = document.createElement('div');
+      banner.className = 'file-protocol-warning';
+      banner.innerHTML = `This page was opened using file:// which prevents FormSubmit (and other features) from working. Please serve the site with a local web server. Example (PowerShell): <code>python -m http.server 8000</code> — then open <a href="http://localhost:8000" target="_blank" rel="noopener">http://localhost:8000</a>. Alternatively use <code>npx serve .</code>.`;
+
+      // Insert banner at top of body
+      document.addEventListener('DOMContentLoaded', () => {
+        document.body.insertAdjacentElement('afterbegin', banner);
+        // If contact form exists, disable submission and show mailto fallback
+        const contactForm = document.getElementById('contactForm');
+        if (contactForm) {
+          const submitBtn = contactForm.querySelector('button[type="submit"]');
+          if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.title = 'Disabled when page is opened via file:// — serve the site over HTTP to enable sending.';
+          }
+          // Add a small fallback note inside the contact info area
+          const infoContainer = document.querySelector('.contact__info');
+          if (infoContainer && !document.querySelector('.file-protocol-fallback')) {
+            const fallback = document.createElement('div');
+            fallback.className = 'file-protocol-fallback';
+            fallback.style.cssText = 'padding:12px;margin-top:8px;border-radius:8px;background:rgba(255,255,255,0.04);color:inherit;';
+            fallback.innerHTML = `Quick fallback: you can still email directly at <a href="mailto:${CONFIG.personalInfo.email}">${CONFIG.personalInfo.email}</a>.`;
+            infoContainer.appendChild(fallback);
+          }
+        }
+      });
+    }
+  } catch (err) {
+    // non-fatal — do nothing
+    console.warn('Could not check file protocol', err);
+  }
+}
+
 // Smooth Scroll Utility
 function smoothScrollTo(targetId) {
   console.log('Attempting to scroll to:', targetId);
@@ -1270,13 +1327,13 @@ class ContactFormManager {
   
   handleSubmit(e) {
     e.preventDefault();
-    
+
     const contactForm = document.getElementById('contactForm');
     const submitButton = contactForm.querySelector('button[type="submit"]');
     const originalText = submitButton.textContent;
     submitButton.textContent = 'Sending...';
     submitButton.disabled = true;
-    
+
     const formData = new FormData(contactForm);
     const data = {
       name: formData.get('name'),
@@ -1284,16 +1341,52 @@ class ContactFormManager {
       subject: formData.get('subject'),
       message: formData.get('message')
     };
-    
-    if (this.validateForm(data)) {
-      // Simulate form submission
-      setTimeout(() => {
-        this.showMessage(CONFIG.contact.successMessage, 'success');
-        this.resetFormWithAnimation();
-        submitButton.textContent = originalText;
-        submitButton.disabled = false;
-      }, 1000);
-    } else {
+
+    if (!this.validateForm(data)) {
+      submitButton.textContent = originalText;
+      submitButton.disabled = false;
+      return;
+    }
+
+    // Send via FormSubmit.co AJAX endpoint to avoid full page redirect and enable JSON response
+    try {
+      const action = contactForm.getAttribute('action') || '';
+      const ajaxEndpoint = action.replace(/\/([^/]+@[^/]+)$/, '/ajax/$1');
+
+      fetch(ajaxEndpoint, {
+        method: 'POST',
+        body: formData
+      })
+        .then(async (resp) => {
+          if (resp.ok) {
+            // FormSubmit returns JSON for the /ajax endpoint
+            const json = await resp.json().catch(() => ({}));
+            const message = (json && json.message) || CONFIG.contact.successMessage;
+            this.showMessage(message, 'success');
+            this.resetFormWithAnimation();
+          } else {
+            // Try to extract JSON error message
+            let errText = CONFIG.contact.errorMessage;
+            try {
+              const errJson = await resp.json();
+              if (errJson && errJson.message) errText = errJson.message;
+            } catch (err) {
+              // ignore
+            }
+            this.showMessage(errText, 'error');
+          }
+        })
+        .catch((error) => {
+          console.error('Contact form submission failed:', error);
+          this.showMessage(CONFIG.contact.errorMessage, 'error');
+        })
+        .finally(() => {
+          submitButton.textContent = originalText;
+          submitButton.disabled = false;
+        });
+    } catch (err) {
+      console.error('Unexpected error while submitting contact form', err);
+      this.showMessage(CONFIG.contact.errorMessage, 'error');
       submitButton.textContent = originalText;
       submitButton.disabled = false;
     }
